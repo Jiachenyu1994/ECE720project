@@ -8,11 +8,11 @@ from torch_geometric.nn import GCNConv
 import tqdm
 import gdsfactory as gf
 
+
+
 # check if pytorch and cuda avaliable
 # print("Torch version:", torch.__version__)
 # print("CUDA available:", torch.cuda.is_available())
-gf.config.pdk = "sky130"
-pdk = gf.get_active_pdk()
 
 class GNN(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels):
@@ -21,9 +21,9 @@ class GNN(torch.nn.Module):
         self.conv2 = GCNConv(hidden_channels, out_channels)
 
     def forward(self, x, edge_index, edge_attr):
-        x = self.conv1(x, edge_index)
+        x = self.conv1(x, edge_index, edge_attr)
         x = F.relu(x)
-        x = self.conv2(x, edge_index)
+        x = self.conv2(x, edge_index, edge_attr)
         return x  # [num_nodes, out_channels] = embedding per transistor
 
 
@@ -128,7 +128,7 @@ def simulate_layout_area(transistors, labels):
     return torch.tensor(group_spread, dtype=torch.float)
 
 
-def train_GNN():
+def train_GNN(data):
     model = GNN(10, 32, 8)  # 10 input features → 8-D embedding
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
@@ -187,17 +187,20 @@ def layout_from_groupings(transistors):
 
 transistors=extract_info_spice("sky130_fd_sc_hd__fa_1.spice")
 edge_list=edges_info(transistors)
-# print('\n'.join(f"{transistor}" for transistor in transistors  ))
-# print('\n'.join(f'{edge}' for edge in edges_info(transistors)))
-# edge_index, edge_attr = build_edges(edge_list)
-# data = Data(
-#     x=build_nodes(transistors),                     
-#     edge_index=edge_index,   
-#     edge_attr=edge_attr  
+print('\n'.join(f"{transistor}" for transistor in transistors  ))
+print('\n'.join(f'{edge}' for edge in edges_info(transistors)))
+edge_index, edge_attr = build_edges(edge_list)
+data = Data(
+    x=build_nodes(transistors),                     
+    edge_index=edge_index,   
+    edge_attr=edge_attr  
 
-# )
-# print(data)
-print(list(pdk.cells.keys()))
+)
+print(data)
+
+#having issues....
+# train_GNN(data)
+# print(list(pdk.cells.keys()))
 
 # spice_file = "sky130_fd_sc_hd__fa_1.spice"
 # transistors = assign_dummy_labels(transistors)  # replace with GNN output
