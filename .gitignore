@@ -1,4 +1,12 @@
 __pycache__/
 *.pyc
 
-/venv
+/project_venv
+/archive
+/validation
+/validation_3_epochs
+/gds_files
+/layouts
+/smaller_layout
+/ext_output
+/gnn_diffusion_model.pth
