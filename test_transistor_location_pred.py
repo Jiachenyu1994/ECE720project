@@ -13,9 +13,10 @@ import torchvision.transforms as transforms
 from torch_geometric.loader import DataLoader as GeoDataLoader
 from tqdm import tqdm
 import networkx as nx
+import pandas as pd
 
 
-NESTLIST_FOLDER = './ext_output'  # Path to the folder containing nestlist files
+NESTLIST_FOLDER = './test_ext'  # Path to the folder containing nestlist files
 
 def extract_info_netlist(spice_file):
     transistors=[]
@@ -130,10 +131,11 @@ def generate_structural_features(edge_index):
     features = torch.cat([degree, clustering, eig_centrality, betweenness, closeness, pagerank, core_number], dim=1)
     return features
 def min_max_normalize(coords):
+    
     min_vals = coords.min(dim=0, keepdim=True)[0]
     max_vals = coords.max(dim=0, keepdim=True)[0]
-    
     return (coords - min_vals) / (max_vals - min_vals + 1e-8)
+
 
 class GNNEncoder(nn.Module):
     def __init__(self, in_channels, edge_attr_dim, hidden_channels, out_channels):
@@ -195,30 +197,20 @@ class GNNEncoder(nn.Module):
         x = self.dropout(x)
 
         return x
-    
-dataset_filenames=[]
-for filename in tqdm(os.listdir(NESTLIST_FOLDER), desc="reading nestlist files"):
-    if filename.endswith('.ext'):
-        dataset_filenames.append(filename.replace('.ext', ''))
 
-random.shuffle(dataset_filenames)
-print(f"Total dataset size: {len(dataset_filenames)}")
-
-train_filenames = dataset_filenames[:int(len(dataset_filenames)*0.8)]
-val_filenames = dataset_filenames[int(len(dataset_filenames)*0.8):int(len(dataset_filenames))]
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-model = GNNEncoder(
-    in_channels=25,
-    edge_attr_dim=1,
-    hidden_channels=64,
-    out_channels=2
-).to(device)
 def dataset_prepare(filenames):
     dataset = []
+    results = []
     for filename in filenames:
         nodes, xylocation = build_nodes(extract_info_netlist(os.path.join(NESTLIST_FOLDER, filename + '.ext')))
+        print(f"{filename}: {xylocation}")
+        for idx, coord in enumerate(xylocation.numpy()):
+            results.append({
+                'graph_id': filename,
+                'node_index': idx,
+                'x': coord[0],
+                'y': coord[1],
+            })
         # xylocation = min_max_normalize(xylocation)
         edge_list = edges_info(extract_info_netlist(os.path.join(NESTLIST_FOLDER, filename + '.ext')))
         edge_index, edge_attr = build_edges(edge_list)
@@ -226,59 +218,63 @@ def dataset_prepare(filenames):
         nodes = torch.cat([nodes, structural_features], dim=1)
         data = Data(x=nodes, edge_index=edge_index, edge_attr=edge_attr, y=xylocation)
         data = data.to(device)
+        data.name = filename  # Store the filename in the data object
         dataset.append(data)
+    df = pd.DataFrame(results)
+    df.to_csv('./predicted_locations/original_coordinates.csv', index=False)
+    print("Saved predictions to ./predicted_locations/original_coordinates.csv")
     return dataset
 
-train_dataset = dataset_prepare(train_filenames)
-val_dataset = dataset_prepare(val_filenames)
-train_loader = GeoDataLoader(train_dataset, batch_size=32, shuffle=True)
-val_loader = GeoDataLoader(val_dataset, batch_size=32, shuffle=False)
-
-
-optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
-progress_bar = tqdm(range(3000), desc="Training Progress")
-
-train_loss_track = []
-val_loss_track = []
-
-for step, epoch in enumerate(progress_bar):
-    model.train()
-    total_train_loss = 0
-
-    for data in train_loader:
-        optimizer.zero_grad()
-        out = model(data.x, data.edge_index, data.edge_attr)
-        loss = F.mse_loss(out, data.y)
-        loss.backward()
-        optimizer.step()
-
-        total_train_loss += loss.item()
+def denormalize(normalized_coords, min_vals, max_vals):
+    """
+    normalized_coords: Tensor of shape [N, 2] (normalized xy predictions)
+    min_vals: Tensor of shape [1, 2] (min x and y used for normalization)
+    max_vals: Tensor of shape [1, 2] (max x and y used for normalization)
     
-    avg_train_loss = total_train_loss / len(train_loader)
-    train_loss_track.append(avg_train_loss)
+    Returns:
+    Denormalized coordinates in original scale
+    """
+   
+    return normalized_coords * (max_vals - min_vals + 1e-8) + min_vals
 
-    # ----- Validation -----
-    model.eval()
-    total_val_loss = 0
+dataset_filenames=[]
+for filename in tqdm(os.listdir("./test_ext"), desc="reading nestlist files"):
+    if filename.endswith('.ext'):
+        dataset_filenames.append(filename.replace('.ext', ''))  
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = GNNEncoder(
+    in_channels=25,
+    edge_attr_dim=1,
+    hidden_channels=64,
+    out_channels=2
+).to(device)
+model.load_state_dict(torch.load('model_weights.pth'))
+test_dataset = dataset_prepare(dataset_filenames)
+
+model.eval()
+os.makedirs('predicted_locations', exist_ok=True)
+
+results = []
+for data in tqdm(test_dataset, desc="Predicting locations"):
+    data = data.to(device)
     with torch.no_grad():
-        for val_data in val_loader:
-            val_out = model(val_data.x, val_data.edge_index, val_data.edge_attr)
-            val_loss = F.mse_loss(val_out, val_data.y)
-            total_val_loss += val_loss.item()
-    
-    avg_val_loss = total_val_loss / len(val_loader)
-    val_loss_track.append(avg_val_loss)
+        output = model(data.x, data.edge_index, data.edge_attr)
+        predicted_coords = output[:, -2:]  # Last two columns are the x and y coordinates
+        # min_vals = data.x[:, -2:].min(dim=0, keepdim=True)[0]
+        # max_vals = data.x[:, -2:].max(dim=0, keepdim=True)[0]   
+        # denormalized_coords = denormalize(predicted_coords, min_vals, max_vals)
+        loss = F.mse_loss(predicted_coords, data.y)
+        print(f"Predicted coordinates: {predicted_coords.cpu().numpy()}")
+        for idx, coord in enumerate(predicted_coords.cpu().numpy()):
+            results.append({
+                'graph_id': data.name if hasattr(data, 'name') else 'unknown',
+                'node_index': idx,
+                'x': coord[0],
+                'y': coord[1],
+                'loss': loss.item()
+            })
 
-    progress_bar.set_description(
-        f"Epoch {epoch} Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}"
-    )
-
-torch.save(model.state_dict(), 'model_weights.pth')
-
-plt.plot(train_loss_track, label='Train Loss')
-plt.plot(val_loss_track, label='Validation Loss')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.title('Train vs Validation Loss')
-plt.legend()
-plt.show()
+df = pd.DataFrame(results)
+df.to_csv('./predicted_locations/predicted_coordinates.csv', index=False)
+print("Saved predictions to ./predicted_locations/predicted_coordinates.csv")

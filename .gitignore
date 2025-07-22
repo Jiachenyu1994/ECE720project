@@ -10,3 +10,4 @@ __pycache__/
 /smaller_layout
 /ext_output
 /gnn_diffusion_model.pth
+/model_weights.pth
